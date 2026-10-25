@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "youtube_tool": {
+      "command": "/path/to/my_mcps/venv/bin/python",
+      "args": ["/path/to/my_mcps/server.py"],
+      "timeout_ms": 120000
+    }
+  }
+}

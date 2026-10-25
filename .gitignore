@@ -1,0 +1,21 @@
+transcripts/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environments
+venv/
+.venv/
+
+# Build and package output
+build/
+dist/
+*.egg-info/
+
+# Test coverage
+.coverage
+htmlcov/
