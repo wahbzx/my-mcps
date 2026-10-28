@@ -62,8 +62,15 @@ and this MCP server.
 
 The MCP tool is `get_video_transcript`. Give it a YouTube `video_url` and,
 optionally, a caption `language` code (default: `en`). It returns the transcript
-to the client without downloading the video or creating a file. The requested
-caption language must be available on YouTube.
+to the client without downloading the video or creating a transcript text file.
+The requested caption language must be available on YouTube.
+
+Fetched transcripts are cached in `transcripts/cache.sqlite3`. Before using
+yt-dlp, the tool checks for the video's ID and requested language in the cache.
+The database stores each video's YouTube link, channel name, title, upload date,
+and cache entry creation time (UTC). A cache hit skips the YouTube request and
+does not change the creation time. Different caption languages are cached
+separately.
 
 
 
@@ -78,5 +85,6 @@ venv/bin/python youtube_tool.py "https://www.youtube.com/watch?v=QRABrn606LE"
 ```
 
 Use `--lang fr` (or another caption language code) to request a different
-language. The script creates a `transcripts` folder in this repository if
-needed and writes `transcripts/<video_id>.txt` there.
+language. The CLI reports whether it fetched the transcript or loaded it from
+the SQLite cache. It does not write a text file by default. Add `--save-txt`
+to also export `transcripts/<video_id>.txt`.

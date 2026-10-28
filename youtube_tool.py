@@ -1,9 +1,89 @@
 import argparse
 import json
+import sqlite3
 import urllib.request
+from contextlib import closing
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 import yt_dlp
+
+
+CACHE_PATH = Path(__file__).resolve().parent / "transcripts" / "cache.sqlite3"
+
+
+def open_cache():
+    CACHE_PATH.parent.mkdir(exist_ok=True)
+    conn = sqlite3.connect(CACHE_PATH, timeout=30)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS videos (
+            video_id TEXT PRIMARY KEY,
+            youtube_url TEXT NOT NULL,
+            channel_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            upload_date TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )"""
+    )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+    if "last_accessed_at" in columns and "created_at" not in columns:
+        conn.execute("ALTER TABLE videos RENAME COLUMN last_accessed_at TO created_at")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS transcripts (
+            video_id TEXT NOT NULL REFERENCES videos(video_id),
+            language TEXT NOT NULL,
+            content TEXT NOT NULL,
+            PRIMARY KEY (video_id, language)
+        )"""
+    )
+    conn.commit()
+    return conn
+
+
+def creation_time():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def get_cached_transcript(video_id, lang):
+    with closing(open_cache()) as conn:
+        row = conn.execute(
+            "SELECT content FROM transcripts WHERE video_id = ? AND language = ?",
+            (video_id, lang),
+        ).fetchone()
+        if row is None:
+            return None
+        return row[0]
+
+
+def save_cached_transcript(video_id, lang, title, channel, upload_date, content):
+    with closing(open_cache()) as conn:
+        with conn:
+            conn.execute(
+                """INSERT INTO videos
+                   (video_id, youtube_url, channel_name, title, upload_date, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(video_id) DO UPDATE SET
+                       youtube_url = excluded.youtube_url,
+                       channel_name = excluded.channel_name,
+                       title = excluded.title,
+                       upload_date = excluded.upload_date""",
+                (
+                    video_id,
+                    f"https://www.youtube.com/watch?v={video_id}",
+                    channel,
+                    title,
+                    upload_date,
+                    creation_time(),
+                ),
+            )
+            conn.execute(
+                """INSERT INTO transcripts (video_id, language, content)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(video_id, language) DO UPDATE SET
+                       content = excluded.content""",
+                (video_id, lang, content),
+            )
 
 """Formatting Helpers"""
 def format_timestamp(milliseconds):
@@ -51,7 +131,12 @@ def format_upload_date(upload_date):
 
 
 """Main get methods"""
-def get_youtube_captions(video_url, lang='en'):
+def get_youtube_captions(video_url, lang='en', return_cache_status=False):
+    video_id = get_video_id(video_url)
+    cached = get_cached_transcript(video_id, lang)
+    if cached is not None:
+        return (cached, True) if return_cache_status else cached
+
     ydl_opts = {
         'skip_download': True,
         'writesubtitles': True,
@@ -97,13 +182,20 @@ def get_youtube_captions(video_url, lang='en'):
         except Exception as e:
             raise RuntimeError(f"Failed to download or parse caption track: {e}") from e
             
+        title = info.get('title') or 'Unknown'
+        channel = info.get('channel') or info.get('uploader') or 'Unknown'
+        upload_date = format_upload_date(info.get('upload_date'))
         metadata = (
-            f"Title: {info.get('title') or 'Unknown'}\n"
-            f"Channel: {info.get('channel') or info.get('uploader') or 'Unknown'}\n"
-            f"Upload date: {format_upload_date(info.get('upload_date'))}"
+            f"Title: {title}\n"
+            f"Channel: {channel}\n"
+            f"Upload date: {upload_date}"
         )
         captions = format_caption_blocks(payload.get('events', []))
-        return f"{metadata}\n\n{captions}"
+        if not captions:
+            raise RuntimeError("The caption track did not contain any transcript text.")
+        transcript = f"{metadata}\n\n{captions}"
+        save_cached_transcript(video_id, lang, title, channel, upload_date, transcript)
+        return (transcript, False) if return_cache_status else transcript
 
 def get_video_id(video_url):
     parsed = urlparse(video_url)
@@ -126,22 +218,27 @@ def get_video_id(video_url):
     return video_id
 
 
-# When run as a standalone script, save the transcript as a file.
+# When run as a standalone script, print cache status and optionally export text.
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Save a YouTube video's captions.")
+    parser = argparse.ArgumentParser(description="Cache a YouTube video's captions.")
     parser.add_argument("url", help="YouTube video URL")
     parser.add_argument("--lang", default="en", help="Caption language code (default: en)")
+    parser.add_argument("--save-txt", action="store_true", help="Also save a transcript text file")
     args = parser.parse_args()
 
     try:
         video_id = get_video_id(args.url)
-        captions = get_youtube_captions(args.url, lang=args.lang)
+        captions, cache_hit = get_youtube_captions(
+            args.url, lang=args.lang, return_cache_status=True
+        )
     except (ValueError, RuntimeError) as exc:
         parser.exit(1, f"Error: {exc}\n")
 
-    transcripts_dir = Path(__file__).resolve().parent / "transcripts"
-    transcripts_dir.mkdir(exist_ok=True)
-    transcript_path = transcripts_dir / f"{video_id}.txt"
-    transcript_path.write_text(captions, encoding="utf-8")
+    action = "Loaded from cache" if cache_hit else "Fetched and cached"
+    print(f"{action}: {video_id} ({args.lang})")
+    print(f"Cache database: {CACHE_PATH}")
 
-    print(f"Captions stored in {transcript_path}")
+    if args.save_txt:
+        transcript_path = CACHE_PATH.parent / f"{video_id}.txt"
+        transcript_path.write_text(captions, encoding="utf-8")
+        print(f"Text file saved: {transcript_path}")
